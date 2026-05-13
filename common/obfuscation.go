@@ -13,7 +13,8 @@ const (
 	// ModeBalanced — balanced obfuscation (~5–7% overhead). Combines padding + TLS mimicry lite.
 	// Implemented in Stage 5.
 	ModeBalanced ObfuscationMode = 2
-	// ModeMaximum — maximum obfuscation for strict DPI environments. Planned for Stage 6.
+	// ModeMaximum — maximum obfuscation (~7–10% overhead). TLS + HMAC cookie + padding.
+	// Implemented in Stage 6.
 	ModeMaximum ObfuscationMode = 3
 	// ModeAuto — automatic mode selection based on network conditions. Planned for Stage 12.
 	ModeAuto ObfuscationMode = 4
@@ -51,6 +52,7 @@ type Obfuscator interface {
 	DeobfuscateData(in []byte) ([]byte, error)
 	// ValidateCookie checks whether a packet carries a valid obfuscation cookie.
 	// VanillaMode, LightMode, and BalancedMode always return true (no cookie mechanism).
+	// MaxMode performs a real HMAC-SHA256 verification.
 	ValidateCookie(packet []byte) bool
 	// Mode returns the ObfuscationMode this instance was configured with.
 	Mode() ObfuscationMode
@@ -100,6 +102,10 @@ func ValidateConfig(cfg Config) error {
 	if cfg.CookieKey != nil && len(cfg.CookieKey) != 32 {
 		return fmt.Errorf("cookie key must be exactly 32 bytes, got %d", len(cfg.CookieKey))
 	}
+	// MaxMode requires a cookie key.
+	if cfg.Mode == ModeMaximum && cfg.CookieKey == nil {
+		return fmt.Errorf("mode %q requires a CookieKey (32 bytes)", cfg.Mode)
+	}
 	return nil
 }
 
@@ -109,8 +115,8 @@ func ValidateConfig(cfg Config) error {
 //   - ModeVanilla  — fully implemented (passthrough, zero overhead)
 //   - ModeLight    — fully implemented (Stage 3: padding obfuscation)
 //   - ModeBalanced — fully implemented (Stage 5: TLS ClientHello + padding)
-//   - ModeMaximum, ModeAuto — return descriptive
-//     "not implemented yet" errors referencing the planned stage
+//   - ModeMaximum  — fully implemented (Stage 6: TLS + HMAC cookie + padding)
+//   - ModeAuto     — "not implemented yet" (planned for Stage 12)
 func NewObfuscator(cfg Config) (Obfuscator, error) {
 	// Apply defaults for zero-value config
 	if cfg == (Config{}) {
@@ -140,7 +146,19 @@ func NewObfuscator(cfg Config) (Obfuscator, error) {
 			sni:    sni,
 		}, nil
 	case ModeMaximum:
-		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 6)", cfg.Mode)
+		sni := cfg.SNI
+		if sni == "" {
+			sni = "cloudflare.com"
+		}
+		// CookieKey is guaranteed non-nil by ValidateConfig.
+		key := make([]byte, 32)
+		copy(key, cfg.CookieKey)
+		return &MaxMode{
+			minPad: cfg.PaddingRange[0],
+			maxPad: cfg.PaddingRange[1],
+			sni:    sni,
+			key:    key,
+		}, nil
 	case ModeAuto:
 		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 12)", cfg.Mode)
 	default:
