@@ -10,10 +10,10 @@ const (
 	ModeVanilla ObfuscationMode = 0
 	// ModeLight — light obfuscation with minimal overhead (<3%). Implemented in Stage 3.
 	ModeLight ObfuscationMode = 1
-	// ModeBalanced — balanced obfuscation (8–15% overhead). Combines padding + TLS mimicry.
+	// ModeBalanced — balanced obfuscation (~5–7% overhead). Combines padding + TLS mimicry lite.
 	// Planned for Stage 5.
 	ModeBalanced ObfuscationMode = 2
-	// ModeMaximum — maximum obfuscation for strict DPI environments. Planned for Stages 6/11.
+	// ModeMaximum — maximum obfuscation for strict DPI environments. Planned for Stage 6.
 	ModeMaximum ObfuscationMode = 3
 	// ModeAuto — automatic mode selection based on network conditions. Planned for Stage 12.
 	ModeAuto ObfuscationMode = 4
@@ -61,7 +61,8 @@ type Config struct {
 	Mode         ObfuscationMode
 	PaddingRange [2]int  // [min, max] extra bytes for data packets
 	JunkRange    [2]int  // [min, max] random junk bytes in handshake
-	TLSProfile   string  // TLS fingerprint profile name (e.g. "chrome-112")
+	TLSProfile   string  // deprecated: kept for backward compatibility, superseded by SNI
+	SNI          string  // TLS SNI hostname (default: "cloudflare.com")
 	CookieKey    []byte  // HMAC key for cookie generation (32 bytes)
 	WebSocketURL string  // WebSocket fallback endpoint
 }
@@ -73,6 +74,7 @@ func DefaultConfig() Config {
 		PaddingRange: [2]int{8, 64},  // Light overhead range (Stage 3)
 		JunkRange:    [2]int{0, 64},
 		TLSProfile:   "chrome-112",
+		SNI:          "cloudflare.com",
 		CookieKey:    nil,
 		WebSocketURL: "",
 	}
