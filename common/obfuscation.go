@@ -8,7 +8,7 @@ type ObfuscationMode int
 const (
 	// ModeVanilla — passthrough mode: zero overhead, bit-for-bit identical to original WireGuard.
 	ModeVanilla ObfuscationMode = 0
-	// ModeLight — light obfuscation with minimal overhead (<3%). Planned for Stage 3.
+	// ModeLight — light obfuscation with minimal overhead (<3%). Implemented in Stage 3.
 	ModeLight ObfuscationMode = 1
 	// ModeBalanced — balanced obfuscation (8–15% overhead). Combines padding + TLS mimicry.
 	// Planned for Stage 5.
@@ -50,7 +50,7 @@ type Obfuscator interface {
 	// DeobfuscateData restores a transport data packet on the receiver side.
 	DeobfuscateData(in []byte) ([]byte, error)
 	// ValidateCookie checks whether a packet carries a valid obfuscation cookie.
-	// VanillaMode always returns true (no cookie mechanism).
+	// VanillaMode and LightMode always return true (no cookie mechanism).
 	ValidateCookie(packet []byte) bool
 	// Mode returns the ObfuscationMode this instance was configured with.
 	Mode() ObfuscationMode
@@ -70,7 +70,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Mode:         ModeVanilla,
-		PaddingRange: [2]int{16, 128},
+		PaddingRange: [2]int{8, 64},  // Light overhead range (Stage 3)
 		JunkRange:    [2]int{0, 64},
 		TLSProfile:   "chrome-112",
 		CookieKey:    nil,
@@ -105,7 +105,8 @@ func ValidateConfig(cfg Config) error {
 //
 // Supported modes:
 //   - ModeVanilla — fully implemented (passthrough, zero overhead)
-//   - ModeLight, ModeBalanced, ModeMaximum, ModeAuto — return descriptive
+//   - ModeLight — fully implemented (Stage 3: padding obfuscation)
+//   - ModeBalanced, ModeMaximum, ModeAuto — return descriptive
 //     "not implemented yet" errors referencing the planned stage
 func NewObfuscator(cfg Config) (Obfuscator, error) {
 	// Apply defaults for zero-value config
@@ -121,7 +122,10 @@ func NewObfuscator(cfg Config) (Obfuscator, error) {
 	case ModeVanilla:
 		return &VanillaMode{}, nil
 	case ModeLight:
-		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 3)", cfg.Mode)
+		return &LightMode{
+			minPad: cfg.PaddingRange[0],
+			maxPad: cfg.PaddingRange[1],
+		}, nil
 	case ModeBalanced:
 		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 5)", cfg.Mode)
 	case ModeMaximum:
