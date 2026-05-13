@@ -33,8 +33,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Mode != ModeVanilla {
 		t.Errorf("default mode = %v, want vanilla", cfg.Mode)
 	}
-	if cfg.PaddingRange[0] != 16 || cfg.PaddingRange[1] != 128 {
-		t.Errorf("default PaddingRange = %v, want [16, 128]", cfg.PaddingRange)
+	// Stage 3: default PaddingRange is [8, 64] (light overhead).
+	if cfg.PaddingRange[0] != 8 || cfg.PaddingRange[1] != 64 {
+		t.Errorf("default PaddingRange = %v, want [8, 64]", cfg.PaddingRange)
 	}
 	if cfg.JunkRange[0] != 0 || cfg.JunkRange[1] != 64 {
 		t.Errorf("default JunkRange = %v, want [0, 64]", cfg.JunkRange)
@@ -212,11 +213,24 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeVanilla,
 		},
+		// Stage 3: LightMode is now fully implemented.
 		{
-			name:      "light mode - not implemented",
-			cfg:       Config{Mode: ModeLight},
-			wantErr:   true,
-			errSubstr: "not implemented yet",
+			name:     "light mode - success",
+			cfg:      Config{Mode: ModeLight, PaddingRange: [2]int{8, 64}},
+			wantErr:  false,
+			wantMode: ModeLight,
+		},
+		{
+			name:     "light mode - zero padding",
+			cfg:      Config{Mode: ModeLight, PaddingRange: [2]int{0, 0}},
+			wantErr:  false,
+			wantMode: ModeLight,
+		},
+		{
+			name:     "light mode - full range",
+			cfg:      Config{Mode: ModeLight, PaddingRange: [2]int{0, 255}},
+			wantErr:  false,
+			wantMode: ModeLight,
 		},
 		{
 			name:      "balanced mode - not implemented",
@@ -289,5 +303,23 @@ func TestVanillaObfuscator_NewObfuscator(t *testing.T) {
 	}
 	if obf.Mode() != ModeVanilla {
 		t.Errorf("Mode() = %v, want %v", obf.Mode(), ModeVanilla)
+	}
+}
+
+// TestLightObfuscator_NewObfuscator ensures the factory returns *LightMode for ModeLight.
+func TestLightObfuscator_NewObfuscator(t *testing.T) {
+	obf, err := NewObfuscator(Config{Mode: ModeLight, PaddingRange: [2]int{8, 64}})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	m, ok := obf.(*LightMode)
+	if !ok {
+		t.Fatalf("expected *LightMode, got %T", obf)
+	}
+	if m.Mode() != ModeLight {
+		t.Errorf("Mode() = %v, want %v", m.Mode(), ModeLight)
+	}
+	if m.minPad != 8 || m.maxPad != 64 {
+		t.Errorf("LightMode pad range = [%d, %d], want [8, 64]", m.minPad, m.maxPad)
 	}
 }
