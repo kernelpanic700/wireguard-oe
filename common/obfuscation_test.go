@@ -226,7 +226,7 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeVanilla,
 		},
-		// Stage 3: LightMode is now fully implemented.
+		// Stage 3: LightMode is fully implemented.
 		{
 			name:     "light mode - success",
 			cfg:      Config{Mode: ModeLight, PaddingRange: [2]int{8, 64}},
@@ -245,11 +245,24 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeLight,
 		},
+		// Stage 5: BalancedMode is now fully implemented.
 		{
-			name:      "balanced mode - not implemented",
-			cfg:       Config{Mode: ModeBalanced},
-			wantErr:   true,
-			errSubstr: "not implemented yet",
+			name:     "balanced mode - success",
+			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 64}},
+			wantErr:  false,
+			wantMode: ModeBalanced,
+		},
+		{
+			name:     "balanced mode - custom SNI",
+			cfg:      Config{Mode: ModeBalanced, SNI: "www.google.com"},
+			wantErr:  false,
+			wantMode: ModeBalanced,
+		},
+		{
+			name:     "balanced mode - zero padding",
+			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{0, 0}},
+			wantErr:  false,
+			wantMode: ModeBalanced,
 		},
 		{
 			name:      "maximum mode - not implemented",
@@ -334,5 +347,38 @@ func TestLightObfuscator_NewObfuscator(t *testing.T) {
 	}
 	if m.minPad != 8 || m.maxPad != 64 {
 		t.Errorf("LightMode pad range = [%d, %d], want [8, 64]", m.minPad, m.maxPad)
+	}
+}
+
+// TestBalancedObfuscator_NewObfuscator ensures the factory returns *BalancedMode for ModeBalanced.
+func TestBalancedObfuscator_NewObfuscator(t *testing.T) {
+	obf, err := NewObfuscator(Config{Mode: ModeBalanced, PaddingRange: [2]int{16, 128}, SNI: "example.com"})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	m, ok := obf.(*BalancedMode)
+	if !ok {
+		t.Fatalf("expected *BalancedMode, got %T", obf)
+	}
+	if m.Mode() != ModeBalanced {
+		t.Errorf("Mode() = %v, want %v", m.Mode(), ModeBalanced)
+	}
+	if m.minPad != 16 || m.maxPad != 128 {
+		t.Errorf("BalancedMode pad range = [%d, %d], want [16, 128]", m.minPad, m.maxPad)
+	}
+	if m.sni != "example.com" {
+		t.Errorf("BalancedMode sni = %q, want %q", m.sni, "example.com")
+	}
+}
+
+// TestBalancedObfuscator_DefaultSNI verifies SNI falls back to default when empty.
+func TestBalancedObfuscator_DefaultSNI(t *testing.T) {
+	obf, err := NewObfuscator(Config{Mode: ModeBalanced})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	m := obf.(*BalancedMode)
+	if m.sni != "cloudflare.com" {
+		t.Errorf("BalancedMode sni = %q, want %q", m.sni, "cloudflare.com")
 	}
 }
