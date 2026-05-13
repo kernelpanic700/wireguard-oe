@@ -33,7 +33,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Mode != ModeVanilla {
 		t.Errorf("default mode = %v, want vanilla", cfg.Mode)
 	}
-	// Stage 3: default PaddingRange is [8, 64] (light overhead).
 	if cfg.PaddingRange[0] != 8 || cfg.PaddingRange[1] != 64 {
 		t.Errorf("default PaddingRange = %v, want [8, 64]", cfg.PaddingRange)
 	}
@@ -43,13 +42,14 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.TLSProfile != "chrome-112" {
 		t.Errorf("default TLSProfile = %q, want \"chrome-112\"", cfg.TLSProfile)
 	}
-	// Stage 4: default SNI is "cloudflare.com".
 	if cfg.SNI != "cloudflare.com" {
 		t.Errorf("default SNI = %q, want \"cloudflare.com\"", cfg.SNI)
 	}
 }
 
 func TestValidateConfig(t *testing.T) {
+	validKey := make([]byte, 32)
+
 	tests := []struct {
 		name      string
 		cfg       Config
@@ -69,7 +69,17 @@ func TestValidateConfig(t *testing.T) {
 				JunkRange:    [2]int{0, 32},
 				TLSProfile:   "firefox-110",
 				SNI:          "www.google.com",
-				CookieKey:    make([]byte, 32),
+				CookieKey:    validKey,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid maximum config",
+			cfg: Config{
+				Mode:         ModeMaximum,
+				PaddingRange: [2]int{8, 64},
+				SNI:          "cloudflare.com",
+				CookieKey:    validKey,
 			},
 			wantErr: false,
 		},
@@ -96,7 +106,28 @@ func TestValidateConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
-		// Stage 5: BalancedMode requires SNI.
+		// Stage 6: MaxMode requires CookieKey.
+		{
+			name: "maximum mode without cookie key",
+			cfg: Config{
+				Mode:         ModeMaximum,
+				PaddingRange: [2]int{8, 64},
+				SNI:          "cloudflare.com",
+			},
+			wantErr:   true,
+			errSubstr: "cookie key is required",
+		},
+		{
+			name: "maximum mode with wrong cookie key length",
+			cfg: Config{
+				Mode:         ModeMaximum,
+				PaddingRange: [2]int{8, 64},
+				SNI:          "cloudflare.com",
+				CookieKey:    make([]byte, 16),
+			},
+			wantErr:   true,
+			errSubstr: "cookie key must be exactly 32 bytes",
+		},
 		{
 			name: "balanced mode without SNI",
 			cfg: Config{
@@ -257,7 +288,7 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeVanilla,
 		},
-		// Stage 3: LightMode is now fully implemented.
+		// Stage 3: LightMode.
 		{
 			name:     "light mode - success",
 			cfg:      Config{Mode: ModeLight, PaddingRange: [2]int{8, 64}},
@@ -276,7 +307,7 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeLight,
 		},
-		// Stage 5: BalancedMode is now fully implemented.
+		// Stage 5: BalancedMode.
 		{
 			name:     "balanced mode - success",
 			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 64}, SNI: "cloudflare.com"},
@@ -301,11 +332,46 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "exceeds 255",
 		},
+		// Stage 6: MaxMode is now fully implemented.
 		{
-			name:      "maximum mode - not implemented",
-			cfg:       Config{Mode: ModeMaximum},
+			name: "maximum mode - success",
+			cfg: Config{
+				Mode:         ModeMaximum,
+				PaddingRange: [2]int{8, 64},
+				SNI:          "cloudflare.com",
+				CookieKey:    validCookieKey,
+			},
+			wantErr:  false,
+			wantMode: ModeMaximum,
+		},
+		{
+			name: "maximum mode - custom ranges",
+			cfg: Config{
+				Mode:         ModeMaximum,
+				PaddingRange: [2]int{16, 128},
+				SNI:          "www.google.com",
+				CookieKey:    validCookieKey,
+			},
+			wantErr:  false,
+			wantMode: ModeMaximum,
+		},
+		{
+			name:      "maximum mode - missing cookie key",
+			cfg:       Config{Mode: ModeMaximum, PaddingRange: [2]int{8, 64}, SNI: "cloudflare.com"},
 			wantErr:   true,
-			errSubstr: "not implemented yet",
+			errSubstr: "cookie key is required",
+		},
+		{
+			name:      "maximum mode - wrong cookie key length",
+			cfg:       Config{Mode: ModeMaximum, PaddingRange: [2]int{8, 64}, SNI: "cloudflare.com", CookieKey: make([]byte, 16)},
+			wantErr:   true,
+			errSubstr: "cookie key must be exactly 32 bytes",
+		},
+		{
+			name:      "maximum mode - missing SNI",
+			cfg:       Config{Mode: ModeMaximum, PaddingRange: [2]int{8, 64}, CookieKey: validCookieKey},
+			wantErr:   true,
+			errSubstr: "SNI is required",
 		},
 		{
 			name:      "auto mode - not implemented",
@@ -409,5 +475,32 @@ func TestBalancedObfuscator_NewObfuscator(t *testing.T) {
 	}
 	if bm.sni != "cloudflare.com" {
 		t.Errorf("BalancedMode sni = %q, want %q", bm.sni, "cloudflare.com")
+	}
+}
+
+// TestMaxObfuscator_NewObfuscator ensures the factory returns *MaxMode for ModeMaximum.
+func TestMaxObfuscator_NewObfuscator(t *testing.T) {
+	key := make([]byte, 32)
+	obf, err := NewObfuscator(Config{
+		Mode:         ModeMaximum,
+		PaddingRange: [2]int{8, 64},
+		SNI:          "cloudflare.com",
+		CookieKey:    key,
+	})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	mm, ok := obf.(*MaxMode)
+	if !ok {
+		t.Fatalf("expected *MaxMode, got %T", obf)
+	}
+	if mm.Mode() != ModeMaximum {
+		t.Errorf("Mode() = %v, want %v", mm.Mode(), ModeMaximum)
+	}
+	if mm.minPad != 8 || mm.maxPad != 64 {
+		t.Errorf("MaxMode pad range = [%d, %d], want [8, 64]", mm.minPad, mm.maxPad)
+	}
+	if mm.sni != "cloudflare.com" {
+		t.Errorf("MaxMode sni = %q, want %q", mm.sni, "cloudflare.com")
 	}
 }

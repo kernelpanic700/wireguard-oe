@@ -1,5 +1,9 @@
 package common
 
+import (
+	"fmt"
+)
+
 // VanillaMode implements Obfuscator as a complete passthrough.
 //
 // VanillaMode is designed to be bit-for-bit identical to original WireGuard:
@@ -120,7 +124,7 @@ func (m *LightMode) Mode() ObfuscationMode {
 //   ObfuscateData → AddPadding(data, minPad, maxPad)
 //   DeobfuscateData → RemovePadding(data)
 //
-// ValidateCookie always returns true (cookie validation will be added in Stage 6).
+// ValidateCookie always returns true (cookie validation added in Stage 6).
 type BalancedMode struct {
 	minPad int
 	maxPad int
@@ -164,15 +168,98 @@ func (m *BalancedMode) Mode() ObfuscationMode {
 	return ModeBalanced
 }
 
-// --- Stub mode structs for future stages ---
-// Defined now to document the planned mode hierarchy and to allow
-// NewObfuscator to reference them in error messages.
+// --- MaxMode: Stage 6 implementation ---
 
 // MaxMode provides maximum obfuscation for the strictest DPI environments.
-// Enables: TLS mimicry + QUIC short-header rotation + active probing protection +
-// WebSocket fallback. Overhead 15–25%.
-// Will be implemented across Stages 6 and 11.
-type MaxMode struct{}
+//
+// MaxMode extends BalancedMode with active probing protection via HMAC-SHA256
+// cookies embedded in the TLS ClientHello GREASE extension.
+//
+// Handshake path:
+//   ObfuscateHandshakeInit:
+//     1. EmbedCookiePayload(key, data) → timestamp(8) + cookie(8) + data
+//     2. ObfuscateClientHello(combined, sni)
+//   DeobfuscateHandshakeInit:
+//     1. DeobfuscateClientHello(packet) → GREASE payload
+//     2. ExtractCookiePayload(key, payload, 90) → data (or error)
+//
+// Data path (same as BalancedMode):
+//   ObfuscateData → AddPadding(data, minPad, maxPad)
+//   DeobfuscateData → RemovePadding(data)
+//
+// ValidateCookie performs real HMAC validation against the embedded cookie.
+// If validation fails, the caller should treat the packet as a DPI probe
+// and respond with random junk (not yet implemented — Stage 7).
+type MaxMode struct {
+	minPad    int
+	maxPad    int
+	sni       string
+	cookieKey []byte // must be exactly 32 bytes
+}
+
+// Compile-time check: MaxMode satisfies Obfuscator.
+var _ Obfuscator = (*MaxMode)(nil)
+
+// ObfuscateHandshakeInit builds a cookie payload from the handshake data,
+// then wraps everything in a TLS ClientHello.
+func (m *MaxMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
+	payload, err := EmbedCookiePayload(m.cookieKey, in)
+	if err != nil {
+		return nil, fmt.Errorf("cookie payload: %w", err)
+	}
+	return ObfuscateClientHello(payload, m.sni)
+}
+
+// DeobfuscateHandshakeInit extracts the TLS wrapper, validates the cookie,
+// and returns the original handshake data.
+func (m *MaxMode) DeobfuscateHandshakeInit(in []byte) ([]byte, error) {
+	payload, err := DeobfuscateClientHello(in)
+	if err != nil {
+		return nil, fmt.Errorf("tls unwrap: %w", err)
+	}
+	data, err := ExtractCookiePayload(m.cookieKey, payload, DefaultCookieWindow)
+	if err != nil {
+		return nil, fmt.Errorf("cookie validation: %w", err)
+	}
+	return data, nil
+}
+
+// ObfuscateData wraps the data packet with the Stage 3 padding format.
+func (m *MaxMode) ObfuscateData(in []byte) ([]byte, error) {
+	return AddPadding(in, m.minPad, m.maxPad)
+}
+
+// DeobfuscateData strips the Stage 3 padding and returns the original packet.
+func (m *MaxMode) DeobfuscateData(in []byte) ([]byte, error) {
+	return RemovePadding(in)
+}
+
+// ValidateCookie performs real HMAC validation of the cookie embedded
+// in the TLS ClientHello GREASE extension.
+//
+// Returns true only if:
+//   - The packet is a valid TLS ClientHello with a GREASE extension.
+//   - The GREASE payload contains a valid timestamp + cookie + data.
+//   - The HMAC-SHA256 matches.
+//   - The timestamp is within ±90 seconds of the current time.
+//
+// Returns false for any malformed, tampered, or expired packet — which
+// indicates a likely DPI probe.
+func (m *MaxMode) ValidateCookie(packet []byte) bool {
+	payload, err := DeobfuscateClientHello(packet)
+	if err != nil {
+		return false
+	}
+	_, err = ExtractCookiePayload(m.cookieKey, payload, DefaultCookieWindow)
+	return err == nil
+}
+
+// Mode returns ModeMaximum.
+func (m *MaxMode) Mode() ObfuscationMode {
+	return ModeMaximum
+}
+
+// --- Stub mode structs for future stages ---
 
 // AutoMode automatically selects the best obfuscation mode based on
 // network conditions, detected DPI behavior, and success rates.

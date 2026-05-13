@@ -13,7 +13,8 @@ const (
 	// ModeBalanced — balanced obfuscation (~5–7% overhead). Combines padding + TLS mimicry.
 	// Implemented in Stage 5.
 	ModeBalanced ObfuscationMode = 2
-	// ModeMaximum — maximum obfuscation for strict DPI environments. Planned for Stage 6.
+	// ModeMaximum — maximum obfuscation for strict DPI environments.
+	// Implemented in Stage 6: TLS mimicry + padding + active probing protection (cookie).
 	ModeMaximum ObfuscationMode = 3
 	// ModeAuto — automatic mode selection based on network conditions. Planned for Stage 12.
 	ModeAuto ObfuscationMode = 4
@@ -51,6 +52,7 @@ type Obfuscator interface {
 	DeobfuscateData(in []byte) ([]byte, error)
 	// ValidateCookie checks whether a packet carries a valid obfuscation cookie.
 	// VanillaMode, LightMode, and BalancedMode always return true (no cookie mechanism).
+	// MaxMode performs real HMAC validation (Stage 6).
 	ValidateCookie(packet []byte) bool
 	// Mode returns the ObfuscationMode this instance was configured with.
 	Mode() ObfuscationMode
@@ -63,7 +65,7 @@ type Config struct {
 	JunkRange    [2]int  // [min, max] random junk bytes in handshake
 	TLSProfile   string  // deprecated: kept for backward compatibility, superseded by SNI
 	SNI          string  // TLS SNI hostname (default: "cloudflare.com")
-	CookieKey    []byte  // HMAC key for cookie generation (32 bytes)
+	CookieKey    []byte  // HMAC key for cookie generation (32 bytes, required for MaxMode)
 	WebSocketURL string  // WebSocket fallback endpoint
 }
 
@@ -104,6 +106,15 @@ func ValidateConfig(cfg Config) error {
 	if cfg.CookieKey != nil && len(cfg.CookieKey) != 32 {
 		return fmt.Errorf("cookie key must be exactly 32 bytes, got %d", len(cfg.CookieKey))
 	}
+	// MaxMode requires a cookie key.
+	if cfg.Mode == ModeMaximum {
+		if cfg.CookieKey == nil {
+			return fmt.Errorf("cookie key is required for %s mode", cfg.Mode)
+		}
+		if len(cfg.CookieKey) != 32 {
+			return fmt.Errorf("cookie key must be exactly 32 bytes for %s mode", cfg.Mode)
+		}
+	}
 	// For modes that use TLS mimicry, SNI must be non-empty.
 	if cfg.Mode >= ModeBalanced && cfg.Mode <= ModeAuto {
 		if cfg.SNI == "" {
@@ -122,8 +133,8 @@ func ValidateConfig(cfg Config) error {
 //   - ModeVanilla — fully implemented (passthrough, zero overhead)
 //   - ModeLight — fully implemented (Stage 3: padding obfuscation)
 //   - ModeBalanced — fully implemented (Stage 5: TLS mimicry + padding)
-//   - ModeMaximum, ModeAuto — return descriptive
-//     "not implemented yet" errors referencing the planned stage
+//   - ModeMaximum — fully implemented (Stage 6: TLS mimicry + padding + cookie)
+//   - ModeAuto — returns descriptive "not implemented yet" error
 func NewObfuscator(cfg Config) (Obfuscator, error) {
 	// Apply defaults for zero-value config
 	if cfg == (Config{}) {
@@ -143,8 +154,6 @@ func NewObfuscator(cfg Config) (Obfuscator, error) {
 			maxPad: cfg.PaddingRange[1],
 		}, nil
 	case ModeBalanced:
-		// Use SNI from config; if empty, fall back to DefaultConfig().SNI
-		// (ValidateConfig already enforces non-empty SNI for Balanced+ modes).
 		sni := cfg.SNI
 		if sni == "" {
 			sni = DefaultConfig().SNI
@@ -155,7 +164,16 @@ func NewObfuscator(cfg Config) (Obfuscator, error) {
 			sni:    sni,
 		}, nil
 	case ModeMaximum:
-		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 6)", cfg.Mode)
+		sni := cfg.SNI
+		if sni == "" {
+			sni = DefaultConfig().SNI
+		}
+		return &MaxMode{
+			minPad:    cfg.PaddingRange[0],
+			maxPad:    cfg.PaddingRange[1],
+			sni:       sni,
+			cookieKey: cfg.CookieKey,
+		}, nil
 	case ModeAuto:
 		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 12)", cfg.Mode)
 	default:

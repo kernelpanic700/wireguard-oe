@@ -595,7 +595,396 @@ func TestBalancedMode_FuzzDeobfuscateData(t *testing.T) {
 }
 
 // =============================================================================
-// Benchmarks — VanillaMode vs LightMode vs BalancedMode
+// MaxMode tests (Stage 6)
+// =============================================================================
+
+func makeCookieKey() []byte {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i ^ 0xAA)
+	}
+	return key
+}
+
+func makeCookieKey2() []byte {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i ^ 0x55)
+	}
+	return key
+}
+
+func TestMaxMode_HandshakeRoundTrip(t *testing.T) {
+	key := makeCookieKey()
+	sizes := []int{0, 1, 64, 148}
+
+	for _, sz := range sizes {
+		t.Run("size="+itoa(sz), func(t *testing.T) {
+			m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+			original := makeData(sz)
+
+			obfuscated, err := m.ObfuscateHandshakeInit(original)
+			if err != nil {
+				t.Fatalf("ObfuscateHandshakeInit: %v", err)
+			}
+
+			// Verify the obfuscated packet looks like a TLS ClientHello.
+			if len(obfuscated) < 5 || obfuscated[0] != 0x16 {
+				t.Errorf("obfuscated packet does not start with TLS record type 0x16")
+			}
+
+			restored, err := m.DeobfuscateHandshakeInit(obfuscated)
+			if err != nil {
+				t.Fatalf("DeobfuscateHandshakeInit: %v", err)
+			}
+
+			if !bytes.Equal(restored, original) {
+				t.Errorf("round-trip mismatch: original %d bytes, restored %d bytes",
+					len(original), len(restored))
+			}
+		})
+	}
+}
+
+func TestMaxMode_DataRoundTrip(t *testing.T) {
+	key := makeCookieKey()
+	sizes := []int{0, 1, 64, 128, 512, 1420}
+	ranges := []struct {
+		minPad, maxPad int
+	}{
+		{0, 0},
+		{4, 32},
+		{8, 64},
+		{16, 128},
+		{0, 255},
+	}
+
+	for _, sz := range sizes {
+		for _, r := range ranges {
+			name := "size=" + itoa(sz) + "_pad=" + itoa(r.minPad) + "-" + itoa(r.maxPad)
+			t.Run(name, func(t *testing.T) {
+				m := &MaxMode{minPad: r.minPad, maxPad: r.maxPad, sni: "cloudflare.com", cookieKey: key}
+				original := makeData(sz)
+
+				obfuscated, err := m.ObfuscateData(original)
+				if err != nil {
+					t.Fatalf("ObfuscateData: %v", err)
+				}
+
+				restored, err := m.DeobfuscateData(obfuscated)
+				if err != nil {
+					t.Fatalf("DeobfuscateData: %v", err)
+				}
+
+				if !bytes.Equal(restored, original) {
+					t.Errorf("round-trip mismatch: original %d bytes, restored %d bytes",
+						len(original), len(restored))
+				}
+			})
+		}
+	}
+}
+
+func TestMaxMode_ValidateCookie_ValidHandshake(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	original := makeHandshakeInit()
+	packet, err := m.ObfuscateHandshakeInit(original)
+	if err != nil {
+		t.Fatalf("ObfuscateHandshakeInit: %v", err)
+	}
+
+	if !m.ValidateCookie(packet) {
+		t.Errorf("ValidateCookie should return true for a valid MaxMode handshake")
+	}
+}
+
+func TestMaxMode_ValidateCookie_Invalid(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	tests := []struct {
+		name   string
+		packet []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+		{"random bytes", makeRandomBytes(200)},
+		{"plain handshake (not TLS-wrapped)", makeHandshakeInit()},
+		{"padded data packet", nil}, // filled below
+	}
+
+	// Generate a padded data packet (not a handshake).
+	dataObf, _ := m.ObfuscateData(makeData(100))
+	tests[4].packet = dataObf
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if m.ValidateCookie(tt.packet) {
+				t.Errorf("ValidateCookie should return false for invalid input: %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestMaxMode_ValidateCookie_WrongKey(t *testing.T) {
+	key1 := makeCookieKey()
+	key2 := makeCookieKey2()
+
+	// Create packet with key1.
+	m1 := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key1}
+	packet, _ := m1.ObfuscateHandshakeInit(makeHandshakeInit())
+
+	// Validate with key2 — must fail.
+	m2 := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key2}
+	if m2.ValidateCookie(packet) {
+		t.Errorf("ValidateCookie with wrong key should return false")
+	}
+}
+
+func TestMaxMode_DeobfuscateHandshake_WrongKey(t *testing.T) {
+	key1 := makeCookieKey()
+	key2 := makeCookieKey2()
+
+	m1 := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key1}
+	packet, _ := m1.ObfuscateHandshakeInit(makeHandshakeInit())
+
+	m2 := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key2}
+	_, err := m2.DeobfuscateHandshakeInit(packet)
+	if err == nil {
+		t.Errorf("DeobfuscateHandshakeInit with wrong key should fail")
+	}
+}
+
+func TestMaxMode_DeobfuscateHandshake_TamperedCookie(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	packet, _ := m.ObfuscateHandshakeInit(makeHandshakeInit())
+
+	// Tamper with a byte in the middle of the packet.
+	tampered := make([]byte, len(packet))
+	copy(tampered, packet)
+	tampered[len(tampered)/2] ^= 0xFF
+
+	_, err := m.DeobfuscateHandshakeInit(tampered)
+	if err == nil {
+		t.Errorf("DeobfuscateHandshakeInit on tampered packet should fail")
+	}
+}
+
+func TestMaxMode_DeobfuscateHandshakeInvalid(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	invalidPackets := [][]byte{
+		nil,
+		{},
+		{0x00, 0x01, 0x02},
+		makeRandomBytes(50),
+		makeRandomBytes(200),
+		makeHandshakeInit(), // plain WG packet, not TLS-wrapped
+	}
+
+	for i, pkt := range invalidPackets {
+		t.Run(itoa(i), func(t *testing.T) {
+			_, err := m.DeobfuscateHandshakeInit(pkt)
+			if err == nil {
+				t.Errorf("expected error for invalid packet, got nil")
+			}
+		})
+	}
+}
+
+func TestMaxMode_DeobfuscateDataInvalid(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	invalidPackets := [][]byte{
+		nil,
+		{},
+		{0x00},
+		makeRandomBytes(20),
+	}
+
+	for i, pkt := range invalidPackets {
+		t.Run(itoa(i), func(t *testing.T) {
+			_, err := m.DeobfuscateData(pkt)
+			if err == nil {
+				t.Errorf("expected error for invalid packet, got nil")
+			}
+			if err != ErrInvalidPadding {
+				t.Errorf("expected ErrInvalidPadding, got %v", err)
+			}
+		})
+	}
+}
+
+func TestMaxMode_DeobfuscateCrossTypeErrors(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	// Handshake → try DeobfuscateData: must fail.
+	hsObf, _ := m.ObfuscateHandshakeInit(makeHandshakeInit())
+	_, err := m.DeobfuscateData(hsObf)
+	if err == nil {
+		t.Errorf("DeobfuscateData on TLS-wrapped handshake should fail")
+	}
+
+	// Data → try DeobfuscateHandshakeInit: must fail.
+	dataObf, _ := m.ObfuscateData(makeData(100))
+	_, err = m.DeobfuscateHandshakeInit(dataObf)
+	if err == nil {
+		t.Errorf("DeobfuscateHandshakeInit on padded data should fail")
+	}
+}
+
+func TestMaxMode_Mode(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	if m.Mode() != ModeMaximum {
+		t.Errorf("Mode() = %v, want ModeMaximum", m.Mode())
+	}
+}
+
+func TestMaxMode_ImplementsInterface(t *testing.T) {
+	key := makeCookieKey()
+	obf, err := NewObfuscator(Config{
+		Mode:         ModeMaximum,
+		PaddingRange: [2]int{8, 64},
+		SNI:          "cloudflare.com",
+		CookieKey:    key,
+	})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	if obf == nil {
+		t.Fatal("expected non-nil Obfuscator")
+	}
+
+	// Verify all methods are accessible and don't panic
+	methods := []struct {
+		name string
+		fn   func()
+	}{
+		{"ObfuscateHandshakeInit", func() { _, _ = obf.ObfuscateHandshakeInit([]byte{1}) }},
+		{"DeobfuscateHandshakeInit", func() { _, _ = obf.DeobfuscateHandshakeInit([]byte{1}) }},
+		{"ObfuscateData", func() { _, _ = obf.ObfuscateData([]byte{1}) }},
+		{"DeobfuscateData", func() { _, _ = obf.DeobfuscateData([]byte{1}) }},
+		{"ValidateCookie", func() { _ = obf.ValidateCookie(nil) }},
+		{"Mode", func() { _ = obf.Mode() }},
+	}
+	for _, m := range methods {
+		t.Run(m.name, func(t *testing.T) {
+			m.fn()
+		})
+	}
+
+	// Type assertion check.
+	mm, ok := obf.(*MaxMode)
+	if !ok {
+		t.Fatalf("expected *MaxMode, got %T", obf)
+	}
+	if mm.sni != "cloudflare.com" {
+		t.Errorf("MaxMode.sni = %q, want %q", mm.sni, "cloudflare.com")
+	}
+	if mm.minPad != 8 || mm.maxPad != 64 {
+		t.Errorf("MaxMode pad range = [%d, %d], want [8, 64]", mm.minPad, mm.maxPad)
+	}
+	if !bytes.Equal(mm.cookieKey, key) {
+		t.Errorf("MaxMode.cookieKey mismatch")
+	}
+}
+
+func TestMaxMode_HandshakeObfuscationIsNotPassthrough(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	original := makeHandshakeInit()
+	obfuscated, err := m.ObfuscateHandshakeInit(original)
+	if err != nil {
+		t.Fatalf("ObfuscateHandshakeInit: %v", err)
+	}
+	if bytes.Equal(obfuscated, original) {
+		t.Errorf("MaxMode handshake should be obfuscated, not passthrough")
+	}
+}
+
+func TestMaxMode_DataObfuscationIsNotPassthrough(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	original := makeData(100)
+	obfuscated, err := m.ObfuscateData(original)
+	if err != nil {
+		t.Fatalf("ObfuscateData: %v", err)
+	}
+	if bytes.Equal(obfuscated, original) {
+		t.Errorf("MaxMode data should be obfuscated, not passthrough")
+	}
+}
+
+func TestMaxMode_HandshakeContainsCookie(t *testing.T) {
+	// Verify that MaxMode handshake is larger than BalancedMode handshake
+	// due to the embedded timestamp + cookie.
+	key := makeCookieKey()
+	maxM := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	balM := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+
+	data := makeHandshakeInit()
+
+	maxPkt, _ := maxM.ObfuscateHandshakeInit(data)
+	balPkt, _ := balM.ObfuscateHandshakeInit(data)
+
+	// MaxMode should be exactly TimestampLen + CookieLen = 16 bytes larger.
+	expectedDiff := TimestampLen + CookieLen
+	actualDiff := len(maxPkt) - len(balPkt)
+	if actualDiff != expectedDiff {
+		t.Errorf("MaxMode handshake should be %d bytes larger than BalancedMode (got %d)",
+			expectedDiff, actualDiff)
+	}
+}
+
+func TestMaxMode_FuzzDeobfuscateHandshake(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	for i := 0; i < 1000; i++ {
+		data := makeRandomBytes(i % 1024)
+		result, err := m.DeobfuscateHandshakeInit(data)
+		if err == nil && result != nil {
+			// Accept valid deobfuscation (extremely unlikely with random bytes).
+		}
+		// The key assertion: no panic.
+	}
+}
+
+func TestMaxMode_FuzzDeobfuscateData(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	for i := 0; i < 1000; i++ {
+		data := makeRandomBytes(i % 512)
+		result, err := m.DeobfuscateData(data)
+		if err == nil && result != nil {
+			// Accept valid deobfuscation.
+		}
+		// No panic.
+	}
+}
+
+func TestMaxMode_FuzzValidateCookie(t *testing.T) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+
+	for i := 0; i < 1000; i++ {
+		data := makeRandomBytes(i % 1024)
+		// ValidateCookie must never panic.
+		_ = m.ValidateCookie(data)
+	}
+}
+
+// =============================================================================
+// Benchmarks — VanillaMode vs LightMode vs BalancedMode vs MaxMode
 // =============================================================================
 
 func BenchmarkVanillaMode_ObfuscateData(b *testing.B) {
@@ -715,9 +1104,95 @@ func BenchmarkBalancedMode_RoundTripHandshake(b *testing.B) {
 	}
 }
 
+func BenchmarkMaxMode_ObfuscateData(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	packet := makeData(1420)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, _ := m.ObfuscateData(packet)
+		_ = result
+	}
+}
+
+func BenchmarkMaxMode_DeobfuscateData(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	padded, _ := m.ObfuscateData(makeData(1420))
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, _ := m.DeobfuscateData(padded)
+		_ = result
+	}
+}
+
+func BenchmarkMaxMode_ObfuscateHandshakeInit(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	packet := makeHandshakeInit()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, _ := m.ObfuscateHandshakeInit(packet)
+		_ = result
+	}
+}
+
+func BenchmarkMaxMode_DeobfuscateHandshakeInit(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	obfuscated, _ := m.ObfuscateHandshakeInit(makeHandshakeInit())
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, _ := m.DeobfuscateHandshakeInit(obfuscated)
+		_ = result
+	}
+}
+
+func BenchmarkMaxMode_RoundTripData(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	data := makeData(1420)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		padded, _ := m.ObfuscateData(data)
+		result, _ := m.DeobfuscateData(padded)
+		_ = result
+	}
+}
+
+func BenchmarkMaxMode_RoundTripHandshake(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	packet := makeHandshakeInit()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		obfuscated, _ := m.ObfuscateHandshakeInit(packet)
+		result, _ := m.DeobfuscateHandshakeInit(obfuscated)
+		_ = result
+	}
+}
+
+func BenchmarkMaxMode_ValidateCookie(b *testing.B) {
+	key := makeCookieKey()
+	m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+	packet, _ := m.ObfuscateHandshakeInit(makeHandshakeInit())
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = m.ValidateCookie(packet)
+	}
+}
+
 // BenchmarkOverheadComparison measures the relative overhead of each mode
-// on MTU-sized data packets.
+// on MTU-sized data packets and handshake packets.
 func BenchmarkOverheadComparison(b *testing.B) {
+	key := makeCookieKey()
 	data := makeData(1420)
 	hs := makeHandshakeInit()
 
@@ -791,6 +1266,58 @@ func BenchmarkOverheadComparison(b *testing.B) {
 			obfuscated, _ := m.ObfuscateHandshakeInit(hs)
 			result, _ := m.DeobfuscateHandshakeInit(obfuscated)
 			_ = result
+		}
+	})
+
+	b.Run("MaxMode_ObfuscateData", func(b *testing.B) {
+		m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			result, _ := m.ObfuscateData(data)
+			_ = result
+		}
+	})
+
+	b.Run("MaxMode_RoundTripData", func(b *testing.B) {
+		m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			padded, _ := m.ObfuscateData(data)
+			result, _ := m.DeobfuscateData(padded)
+			_ = result
+		}
+	})
+
+	b.Run("MaxMode_ObfuscateHandshakeInit", func(b *testing.B) {
+		m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			result, _ := m.ObfuscateHandshakeInit(hs)
+			_ = result
+		}
+	})
+
+	b.Run("MaxMode_RoundTripHandshake", func(b *testing.B) {
+		m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			obfuscated, _ := m.ObfuscateHandshakeInit(hs)
+			result, _ := m.DeobfuscateHandshakeInit(obfuscated)
+			_ = result
+		}
+	})
+
+	b.Run("MaxMode_ValidateCookie", func(b *testing.B) {
+		m := &MaxMode{minPad: 8, maxPad: 64, sni: "cloudflare.com", cookieKey: key}
+		obfuscated, _ := m.ObfuscateHandshakeInit(hs)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = m.ValidateCookie(obfuscated)
 		}
 	})
 }
