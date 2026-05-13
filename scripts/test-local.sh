@@ -1,0 +1,3 @@
+#!/bin/bash
+set -e
+cd common && go test -v ./...

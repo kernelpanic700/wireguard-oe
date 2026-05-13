@@ -1,0 +1,12 @@
+[Unit]
+Description=WireGuard-OE Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wireguard-oe-server --config /etc/wireguard-oe/config.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
