@@ -1,0 +1,20 @@
+name: Build Windows Client
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+      - name: Build Windows client
+        run: |
+          cd client-windows
+          go build -o ../bin/wireguard-oe-client.exe .
