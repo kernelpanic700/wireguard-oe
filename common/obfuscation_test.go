@@ -43,6 +43,10 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.TLSProfile != "chrome-112" {
 		t.Errorf("default TLSProfile = %q, want \"chrome-112\"", cfg.TLSProfile)
 	}
+	// Stage 4: default SNI is "cloudflare.com".
+	if cfg.SNI != "cloudflare.com" {
+		t.Errorf("default SNI = %q, want \"cloudflare.com\"", cfg.SNI)
+	}
 }
 
 func TestValidateConfig(t *testing.T) {
@@ -80,6 +84,14 @@ func TestValidateConfig(t *testing.T) {
 			cfg: Config{
 				Mode:         ModeLight,
 				PaddingRange: [2]int{0, 0},
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid config with custom SNI",
+			cfg: Config{
+				Mode: ModeLight,
+				SNI:  "www.google.com",
 			},
 			wantErr: false,
 		},
@@ -202,6 +214,7 @@ func TestNewObfuscator(t *testing.T) {
 				PaddingRange: [2]int{0, 0},
 				JunkRange:    [2]int{0, 0},
 				TLSProfile:   "chrome-112",
+				SNI:          "cloudflare.com",
 				CookieKey:    validCookieKey,
 			},
 			wantErr:  false,
