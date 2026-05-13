@@ -65,9 +65,10 @@ func TestValidateConfig(t *testing.T) {
 			name: "valid balanced config with custom ranges",
 			cfg: Config{
 				Mode:         ModeBalanced,
-				PaddingRange: [2]int{32, 256},
+				PaddingRange: [2]int{32, 255},
 				JunkRange:    [2]int{0, 32},
 				TLSProfile:   "firefox-110",
+				SNI:          "www.google.com",
 				CookieKey:    make([]byte, 32),
 			},
 			wantErr: false,
@@ -94,6 +95,36 @@ func TestValidateConfig(t *testing.T) {
 				SNI:  "www.google.com",
 			},
 			wantErr: false,
+		},
+		// Stage 5: BalancedMode requires SNI.
+		{
+			name: "balanced mode without SNI",
+			cfg: Config{
+				Mode:         ModeBalanced,
+				PaddingRange: [2]int{8, 64},
+			},
+			wantErr:   true,
+			errSubstr: "SNI is required",
+		},
+		{
+			name: "balanced mode with too-long SNI",
+			cfg: Config{
+				Mode:         ModeBalanced,
+				PaddingRange: [2]int{8, 64},
+				SNI:          string(make([]byte, 256)),
+			},
+			wantErr:   true,
+			errSubstr: "SNI too long",
+		},
+		{
+			name: "balanced mode with padding max > 255",
+			cfg: Config{
+				Mode:         ModeBalanced,
+				PaddingRange: [2]int{8, 300},
+				SNI:          "cloudflare.com",
+			},
+			wantErr:   true,
+			errSubstr: "exceeds 255",
 		},
 		{
 			name: "invalid mode (negative)",
@@ -245,11 +276,30 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeLight,
 		},
+		// Stage 5: BalancedMode is now fully implemented.
 		{
-			name:      "balanced mode - not implemented",
-			cfg:       Config{Mode: ModeBalanced},
+			name:     "balanced mode - success",
+			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 64}, SNI: "cloudflare.com"},
+			wantErr:  false,
+			wantMode: ModeBalanced,
+		},
+		{
+			name:     "balanced mode - custom SNI",
+			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 64}, SNI: "www.google.com"},
+			wantErr:  false,
+			wantMode: ModeBalanced,
+		},
+		{
+			name:      "balanced mode - missing SNI",
+			cfg:       Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 64}},
 			wantErr:   true,
-			errSubstr: "not implemented yet",
+			errSubstr: "SNI is required",
+		},
+		{
+			name:      "balanced mode - padding max > 255",
+			cfg:       Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 300}, SNI: "cloudflare.com"},
+			wantErr:   true,
+			errSubstr: "exceeds 255",
 		},
 		{
 			name:      "maximum mode - not implemented",
@@ -334,5 +384,30 @@ func TestLightObfuscator_NewObfuscator(t *testing.T) {
 	}
 	if m.minPad != 8 || m.maxPad != 64 {
 		t.Errorf("LightMode pad range = [%d, %d], want [8, 64]", m.minPad, m.maxPad)
+	}
+}
+
+// TestBalancedObfuscator_NewObfuscator ensures the factory returns *BalancedMode for ModeBalanced.
+func TestBalancedObfuscator_NewObfuscator(t *testing.T) {
+	obf, err := NewObfuscator(Config{
+		Mode:         ModeBalanced,
+		PaddingRange: [2]int{8, 64},
+		SNI:          "cloudflare.com",
+	})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	bm, ok := obf.(*BalancedMode)
+	if !ok {
+		t.Fatalf("expected *BalancedMode, got %T", obf)
+	}
+	if bm.Mode() != ModeBalanced {
+		t.Errorf("Mode() = %v, want %v", bm.Mode(), ModeBalanced)
+	}
+	if bm.minPad != 8 || bm.maxPad != 64 {
+		t.Errorf("BalancedMode pad range = [%d, %d], want [8, 64]", bm.minPad, bm.maxPad)
+	}
+	if bm.sni != "cloudflare.com" {
+		t.Errorf("BalancedMode sni = %q, want %q", bm.sni, "cloudflare.com")
 	}
 }

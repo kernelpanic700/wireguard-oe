@@ -106,14 +106,67 @@ func (m *LightMode) Mode() ObfuscationMode {
 	return ModeLight
 }
 
+// --- BalancedMode: Stage 5 implementation ---
+
+// BalancedMode provides moderate obfuscation (~5–7% overhead).
+// It combines TLS ClientHello mimicry for handshake packets with
+// variable-length padding for data packets.
+//
+// Handshake path:
+//   ObfuscateHandshakeInit → ObfuscateClientHello(data, sni)
+//   DeobfuscateHandshakeInit → DeobfuscateClientHello(data)
+//
+// Data path:
+//   ObfuscateData → AddPadding(data, minPad, maxPad)
+//   DeobfuscateData → RemovePadding(data)
+//
+// ValidateCookie always returns true (cookie validation will be added in Stage 6).
+type BalancedMode struct {
+	minPad int
+	maxPad int
+	sni    string
+}
+
+// Compile-time check: BalancedMode satisfies Obfuscator.
+var _ Obfuscator = (*BalancedMode)(nil)
+
+// ObfuscateHandshakeInit wraps the handshake packet in a TLS 1.2 ClientHello
+// using the configured SNI hostname.
+func (m *BalancedMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
+	return ObfuscateClientHello(in, m.sni)
+}
+
+// DeobfuscateHandshakeInit extracts the original handshake packet from the
+// TLS ClientHello wrapper.
+func (m *BalancedMode) DeobfuscateHandshakeInit(in []byte) ([]byte, error) {
+	return DeobfuscateClientHello(in)
+}
+
+// ObfuscateData wraps the data packet with the Stage 3 padding format.
+func (m *BalancedMode) ObfuscateData(in []byte) ([]byte, error) {
+	return AddPadding(in, m.minPad, m.maxPad)
+}
+
+// DeobfuscateData strips the Stage 3 padding and returns the original packet.
+// Returns ErrInvalidPadding if the packet is not a valid Stage 3 padded packet.
+func (m *BalancedMode) DeobfuscateData(in []byte) ([]byte, error) {
+	return RemovePadding(in)
+}
+
+// ValidateCookie always returns true (no cookie mechanism in BalancedMode).
+// Cookie-based validation will be added in Stage 6 (MaxMode).
+func (m *BalancedMode) ValidateCookie(packet []byte) bool {
+	return true
+}
+
+// Mode returns ModeBalanced.
+func (m *BalancedMode) Mode() ObfuscationMode {
+	return ModeBalanced
+}
+
 // --- Stub mode structs for future stages ---
 // Defined now to document the planned mode hierarchy and to allow
 // NewObfuscator to reference them in error messages.
-
-// BalancedMode provides moderate obfuscation (8–15% overhead).
-// Combines padding + TLS mimicry for a good balance of stealth and performance.
-// Will be implemented in Stage 5.
-type BalancedMode struct{}
 
 // MaxMode provides maximum obfuscation for the strictest DPI environments.
 // Enables: TLS mimicry + QUIC short-header rotation + active probing protection +
