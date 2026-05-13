@@ -106,174 +106,20 @@ func (m *LightMode) Mode() ObfuscationMode {
 	return ModeLight
 }
 
-// --- BalancedMode: Stage 5 implementation ---
+// --- Stub mode structs for future stages ---
+// Defined now to document the planned mode hierarchy and to allow
+// NewObfuscator to reference them in error messages.
 
-// BalancedMode provides moderate obfuscation (~5–7% overhead).
-//
-// BalancedMode combines TLS ClientHello mimicry for handshake packets with
-// variable-length padding for data packets. This offers a good balance of
-// stealth and performance suitable for most DPI-circumvention scenarios.
-//
-// Handshake path:
-//   ObfuscateHandshakeInit  → wraps in TLS ClientHello (Stage 4)
-//   DeobfuscateHandshakeInit → unwraps TLS ClientHello
-//
-// Data path:
-//   ObfuscateData  → AddPadding (Stage 3)
-//   DeobfuscateData → RemovePadding (Stage 3)
-//
-// Overhead characteristics (DefaultConfig: minPad=8, maxPad=64, SNI="cloudflare.com"):
-//   - Per handshake: ~250 bytes (TLS wrapper, ~170% on 148-byte init)
-//   - Per data packet: 12–83 bytes (avg ~40, ~2.8% on MTU 1420)
-//   - Average per-flow: ~5–7% (weighted by handshake frequency)
-type BalancedMode struct {
-	minPad int
-	maxPad int
-	sni    string
-}
-
-// Compile-time check: BalancedMode satisfies Obfuscator.
-var _ Obfuscator = (*BalancedMode)(nil)
-
-// ObfuscateHandshakeInit wraps the handshake packet inside a TLS 1.2 ClientHello.
-func (m *BalancedMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
-	return ObfuscateClientHello(in, m.sni)
-}
-
-// DeobfuscateHandshakeInit extracts the handshake packet from a TLS ClientHello wrapper.
-func (m *BalancedMode) DeobfuscateHandshakeInit(in []byte) ([]byte, error) {
-	return DeobfuscateClientHello(in)
-}
-
-// ObfuscateData wraps the data packet with the Stage 3 padding format.
-func (m *BalancedMode) ObfuscateData(in []byte) ([]byte, error) {
-	return AddPadding(in, m.minPad, m.maxPad)
-}
-
-// DeobfuscateData strips the Stage 3 padding and returns the original packet.
-func (m *BalancedMode) DeobfuscateData(in []byte) ([]byte, error) {
-	return RemovePadding(in)
-}
-
-// ValidateCookie always returns true (no cookie mechanism in BalancedMode).
-func (m *BalancedMode) ValidateCookie(packet []byte) bool {
-	return true
-}
-
-// Mode returns ModeBalanced.
-func (m *BalancedMode) Mode() ObfuscationMode {
-	return ModeBalanced
-}
-
-// --- MaxMode: Stage 6 implementation ---
+// BalancedMode provides moderate obfuscation (8–15% overhead).
+// Combines padding + TLS mimicry for a good balance of stealth and performance.
+// Will be implemented in Stage 5.
+type BalancedMode struct{}
 
 // MaxMode provides maximum obfuscation for the strictest DPI environments.
-//
-// MaxMode extends BalancedMode with an HMAC-SHA256 cookie embedded in the
-// TLS SessionID field. The cookie authenticates the handshake and prevents
-// replay and injection attacks by active probing systems.
-//
-// Handshake path:
-//   ObfuscateHandshakeInit:
-//     1. Generate 8-byte cookie = HMAC-SHA256(key, original[:64])[:8]
-//     2. Prepend cookie to original handshake data
-//     3. Wrap [cookie | original] in TLS ClientHello with default SessionID
-//
-//   DeobfuscateHandshakeInit:
-//     1. Unwrap TLS ClientHello → [cookie | original]
-//     2. Extract cookie (first 8 bytes), remaining = original
-//     3. Verify cookie = HMAC-SHA256(key, original[:64])[:8]
-//     4. Return original (without cookie)
-//
-// Data path:
-//   ObfuscateData  → AddPadding (Stage 3)
-//   DeobfuscateData → RemovePadding (Stage 3)
-//
-// Overhead characteristics (DefaultConfig: minPad=8, maxPad=64, SNI="cloudflare.com"):
-//   - Per handshake: ~258 bytes (TLS wrapper + 8-byte cookie)
-//   - Per data packet: 12–83 bytes (avg ~40, ~2.8% on MTU 1420)
-//   - Average per-flow: ~7–10%
-type MaxMode struct {
-	minPad int
-	maxPad int
-	sni    string
-	key    []byte // 32-byte HMAC-SHA256 key
-}
-
-// Compile-time check: MaxMode satisfies Obfuscator.
-var _ Obfuscator = (*MaxMode)(nil)
-
-// ObfuscateHandshakeInit embeds a cookie into the handshake and wraps in TLS ClientHello.
-func (m *MaxMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
-	cookie, err := GenerateCookie(m.key, in)
-	if err != nil {
-		return nil, err
-	}
-
-	// Embed cookie before handshake data: [cookie | original]
-	payload := make([]byte, CookieLen+len(in))
-	copy(payload[:CookieLen], cookie)
-	copy(payload[CookieLen:], in)
-
-	return ObfuscateClientHello(payload, m.sni)
-}
-
-// DeobfuscateHandshakeInit extracts the handshake and verifies the HMAC cookie.
-// Returns ErrNotClientHello for non-TLS wrappers, ErrInvalidCookie for bad cookies.
-func (m *MaxMode) DeobfuscateHandshakeInit(in []byte) ([]byte, error) {
-	payload, err := DeobfuscateClientHello(in)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(payload) < CookieLen {
-		return nil, ErrNotClientHello
-	}
-
-	cookie := payload[:CookieLen]
-	original := payload[CookieLen:]
-
-	if err := ValidateCookieBytes(m.key, original, cookie); err != nil {
-		return nil, err
-	}
-
-	return original, nil
-}
-
-// ObfuscateData wraps the data packet with the Stage 3 padding format.
-func (m *MaxMode) ObfuscateData(in []byte) ([]byte, error) {
-	return AddPadding(in, m.minPad, m.maxPad)
-}
-
-// DeobfuscateData strips the Stage 3 padding and returns the original packet.
-func (m *MaxMode) DeobfuscateData(in []byte) ([]byte, error) {
-	return RemovePadding(in)
-}
-
-// ValidateCookie checks whether the handshake carries a valid HMAC cookie.
-// This is a secondary validation path that can be used for active-probe rejection.
-// The primary cookie validation happens in DeobfuscateHandshakeInit.
-func (m *MaxMode) ValidateCookie(packet []byte) bool {
-	if len(packet) < CookieLen {
-		return false
-	}
-	// Try to extract the handshake payload and verify the cookie.
-	payload, err := DeobfuscateClientHello(packet)
-	if err != nil {
-		return false
-	}
-	if len(payload) < CookieLen {
-		return false
-	}
-	return ValidateCookieBytes(m.key, payload[CookieLen:], payload[:CookieLen]) == nil
-}
-
-// Mode returns ModeMaximum.
-func (m *MaxMode) Mode() ObfuscationMode {
-	return ModeMaximum
-}
-
-// --- Stub mode struct for future stage ---
+// Enables: TLS mimicry + QUIC short-header rotation + active probing protection +
+// WebSocket fallback. Overhead 15–25%.
+// Will be implemented across Stages 6 and 11.
+type MaxMode struct{}
 
 // AutoMode automatically selects the best obfuscation mode based on
 // network conditions, detected DPI behavior, and success rates.

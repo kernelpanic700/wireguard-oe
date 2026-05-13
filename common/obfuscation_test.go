@@ -50,8 +50,6 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestValidateConfig(t *testing.T) {
-	validKey := make([]byte, 32)
-
 	tests := []struct {
 		name      string
 		cfg       Config
@@ -70,7 +68,7 @@ func TestValidateConfig(t *testing.T) {
 				PaddingRange: [2]int{32, 256},
 				JunkRange:    [2]int{0, 32},
 				TLSProfile:   "firefox-110",
-				CookieKey:    validKey,
+				CookieKey:    make([]byte, 32),
 			},
 			wantErr: false,
 		},
@@ -96,24 +94,6 @@ func TestValidateConfig(t *testing.T) {
 				SNI:  "www.google.com",
 			},
 			wantErr: false,
-		},
-		// Stage 6: MaxMode requires CookieKey.
-		{
-			name: "valid max mode config",
-			cfg: Config{
-				Mode:         ModeMaximum,
-				PaddingRange: [2]int{8, 64},
-				CookieKey:    validKey,
-			},
-			wantErr: false,
-		},
-		{
-			name: "max mode without cookie key",
-			cfg: Config{
-				Mode: ModeMaximum,
-			},
-			wantErr:   true,
-			errSubstr: "requires a CookieKey",
 		},
 		{
 			name: "invalid mode (negative)",
@@ -246,7 +226,7 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeVanilla,
 		},
-		// Stage 3: LightMode is fully implemented.
+		// Stage 3: LightMode is now fully implemented.
 		{
 			name:     "light mode - success",
 			cfg:      Config{Mode: ModeLight, PaddingRange: [2]int{8, 64}},
@@ -265,43 +245,17 @@ func TestNewObfuscator(t *testing.T) {
 			wantErr:  false,
 			wantMode: ModeLight,
 		},
-		// Stage 5: BalancedMode is fully implemented.
 		{
-			name:     "balanced mode - success",
-			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{8, 64}},
-			wantErr:  false,
-			wantMode: ModeBalanced,
+			name:      "balanced mode - not implemented",
+			cfg:       Config{Mode: ModeBalanced},
+			wantErr:   true,
+			errSubstr: "not implemented yet",
 		},
 		{
-			name:     "balanced mode - custom SNI",
-			cfg:      Config{Mode: ModeBalanced, SNI: "www.google.com"},
-			wantErr:  false,
-			wantMode: ModeBalanced,
-		},
-		{
-			name:     "balanced mode - zero padding",
-			cfg:      Config{Mode: ModeBalanced, PaddingRange: [2]int{0, 0}},
-			wantErr:  false,
-			wantMode: ModeBalanced,
-		},
-		// Stage 6: MaxMode is fully implemented.
-		{
-			name:     "max mode - success",
-			cfg:      Config{Mode: ModeMaximum, PaddingRange: [2]int{8, 64}, CookieKey: validCookieKey},
-			wantErr:  false,
-			wantMode: ModeMaximum,
-		},
-		{
-			name:     "max mode - custom SNI",
-			cfg:      Config{Mode: ModeMaximum, SNI: "www.google.com", CookieKey: validCookieKey},
-			wantErr:  false,
-			wantMode: ModeMaximum,
-		},
-		{
-			name:      "max mode - missing cookie key",
+			name:      "maximum mode - not implemented",
 			cfg:       Config{Mode: ModeMaximum},
 			wantErr:   true,
-			errSubstr: "requires a CookieKey",
+			errSubstr: "not implemented yet",
 		},
 		{
 			name:      "auto mode - not implemented",
@@ -380,83 +334,5 @@ func TestLightObfuscator_NewObfuscator(t *testing.T) {
 	}
 	if m.minPad != 8 || m.maxPad != 64 {
 		t.Errorf("LightMode pad range = [%d, %d], want [8, 64]", m.minPad, m.maxPad)
-	}
-}
-
-// TestBalancedObfuscator_NewObfuscator ensures the factory returns *BalancedMode for ModeBalanced.
-func TestBalancedObfuscator_NewObfuscator(t *testing.T) {
-	obf, err := NewObfuscator(Config{Mode: ModeBalanced, PaddingRange: [2]int{16, 128}, SNI: "example.com"})
-	if err != nil {
-		t.Fatalf("NewObfuscator() error = %v", err)
-	}
-	m, ok := obf.(*BalancedMode)
-	if !ok {
-		t.Fatalf("expected *BalancedMode, got %T", obf)
-	}
-	if m.Mode() != ModeBalanced {
-		t.Errorf("Mode() = %v, want %v", m.Mode(), ModeBalanced)
-	}
-	if m.minPad != 16 || m.maxPad != 128 {
-		t.Errorf("BalancedMode pad range = [%d, %d], want [16, 128]", m.minPad, m.maxPad)
-	}
-	if m.sni != "example.com" {
-		t.Errorf("BalancedMode sni = %q, want %q", m.sni, "example.com")
-	}
-}
-
-// TestBalancedObfuscator_DefaultSNI verifies SNI falls back to default when empty.
-func TestBalancedObfuscator_DefaultSNI(t *testing.T) {
-	obf, err := NewObfuscator(Config{Mode: ModeBalanced})
-	if err != nil {
-		t.Fatalf("NewObfuscator() error = %v", err)
-	}
-	m := obf.(*BalancedMode)
-	if m.sni != "cloudflare.com" {
-		t.Errorf("BalancedMode sni = %q, want %q", m.sni, "cloudflare.com")
-	}
-}
-
-// TestMaxObfuscator_NewObfuscator ensures the factory returns *MaxMode for ModeMaximum.
-func TestMaxObfuscator_NewObfuscator(t *testing.T) {
-	key := make([]byte, 32)
-	for i := range key {
-		key[i] = byte(i)
-	}
-
-	obf, err := NewObfuscator(Config{
-		Mode:         ModeMaximum,
-		PaddingRange: [2]int{16, 128},
-		SNI:          "example.com",
-		CookieKey:    key,
-	})
-	if err != nil {
-		t.Fatalf("NewObfuscator() error = %v", err)
-	}
-	m, ok := obf.(*MaxMode)
-	if !ok {
-		t.Fatalf("expected *MaxMode, got %T", obf)
-	}
-	if m.Mode() != ModeMaximum {
-		t.Errorf("Mode() = %v, want %v", m.Mode(), ModeMaximum)
-	}
-	if m.minPad != 16 || m.maxPad != 128 {
-		t.Errorf("MaxMode pad range = [%d, %d], want [16, 128]", m.minPad, m.maxPad)
-	}
-	if m.sni != "example.com" {
-		t.Errorf("MaxMode sni = %q, want %q", m.sni, "example.com")
-	}
-	if string(m.key) != string(key) {
-		t.Errorf("MaxMode key mismatch")
-	}
-}
-
-// TestMaxObfuscator_RequiresCookieKey verifies factory rejects MaxMode without key.
-func TestMaxObfuscator_RequiresCookieKey(t *testing.T) {
-	_, err := NewObfuscator(Config{Mode: ModeMaximum})
-	if err == nil {
-		t.Fatal("expected error for MaxMode without CookieKey")
-	}
-	if !strings.Contains(err.Error(), "CookieKey") {
-		t.Errorf("error should mention CookieKey, got: %v", err)
 	}
 }
