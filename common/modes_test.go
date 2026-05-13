@@ -309,7 +309,209 @@ func TestLightMode_ImplementsInterface(t *testing.T) {
 }
 
 // =============================================================================
-// Benchmarks — VanillaMode vs LightMode
+// BalancedMode tests (Stage 5)
+// =============================================================================
+
+func TestBalancedMode_HandshakeRoundTrip(t *testing.T) {
+	sizes := []int{0, 1, 64, 128, 148, 256, 512}
+	snis := []string{"cloudflare.com", "www.google.com", "example.org"}
+
+	for _, sz := range sizes {
+		for _, sni := range snis {
+			name := "size=" + itoa(sz) + "_sni=" + sni
+			t.Run(name, func(t *testing.T) {
+				m := &BalancedMode{minPad: 8, maxPad: 64, sni: sni}
+				original := makeHandshakeData(sz)
+
+				obfuscated, err := m.ObfuscateHandshakeInit(original)
+				if err != nil {
+					t.Fatalf("ObfuscateHandshakeInit: %v", err)
+				}
+
+				// Must look like TLS ClientHello.
+				if len(obfuscated) < 43 {
+					t.Errorf("result too small: %d bytes", len(obfuscated))
+				}
+				if obfuscated[0] != 0x16 {
+					t.Errorf("first byte = 0x%02X, want 0x16", obfuscated[0])
+				}
+
+				restored, err := m.DeobfuscateHandshakeInit(obfuscated)
+				if err != nil {
+					t.Fatalf("DeobfuscateHandshakeInit: %v", err)
+				}
+
+				if !bytes.Equal(restored, original) {
+					t.Errorf("round-trip mismatch: original %d bytes, restored %d bytes",
+						len(original), len(restored))
+				}
+			})
+		}
+	}
+}
+
+func TestBalancedMode_HandshakeInvalid(t *testing.T) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+
+	invalidPackets := [][]byte{
+		nil,
+		{},
+		{0x16},
+		makeRandomTLSBytes(100),
+		noGreasePacket(),
+	}
+
+	for i, pkt := range invalidPackets {
+		t.Run(itoa(i), func(t *testing.T) {
+			_, err := m.DeobfuscateHandshakeInit(pkt)
+			if err == nil {
+				t.Errorf("expected error for invalid handshake packet, got nil")
+			}
+			if err != ErrNotClientHello {
+				t.Errorf("expected ErrNotClientHello, got %v", err)
+			}
+		})
+	}
+}
+
+func TestBalancedMode_DataRoundTrip(t *testing.T) {
+	sizes := []int{0, 1, 64, 128, 512, 1420}
+	ranges := []struct {
+		minPad, maxPad int
+	}{
+		{0, 0},
+		{4, 32},
+		{8, 64},
+		{16, 128},
+		{0, 255},
+	}
+
+	for _, sz := range sizes {
+		for _, r := range ranges {
+			name := "size=" + itoa(sz) + "_pad=" + itoa(r.minPad) + "-" + itoa(r.maxPad)
+			t.Run(name, func(t *testing.T) {
+				m := &BalancedMode{minPad: r.minPad, maxPad: r.maxPad, sni: "test.com"}
+				original := makeData(sz)
+
+				obfuscated, err := m.ObfuscateData(original)
+				if err != nil {
+					t.Fatalf("ObfuscateData: %v", err)
+				}
+
+				restored, err := m.DeobfuscateData(obfuscated)
+				if err != nil {
+					t.Fatalf("DeobfuscateData: %v", err)
+				}
+
+				if !bytes.Equal(restored, original) {
+					t.Errorf("round-trip mismatch: original %d bytes, restored %d bytes",
+						len(original), len(restored))
+				}
+			})
+		}
+	}
+}
+
+func TestBalancedMode_DataInvalid(t *testing.T) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+
+	invalidPackets := [][]byte{
+		nil,
+		{},
+		{0x00},
+		makeRandomBytes(20),
+	}
+
+	for i, pkt := range invalidPackets {
+		t.Run(itoa(i), func(t *testing.T) {
+			_, err := m.DeobfuscateData(pkt)
+			if err == nil {
+				t.Errorf("expected error for invalid data packet, got nil")
+			}
+			if err != ErrInvalidPadding {
+				t.Errorf("expected ErrInvalidPadding, got %v", err)
+			}
+		})
+	}
+}
+
+func TestBalancedMode_ValidateCookie(t *testing.T) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+
+	tests := [][]byte{
+		nil,
+		{},
+		{0xde, 0xad, 0xbe, 0xef},
+		makeHandshakeInit(),
+	}
+
+	for _, pkt := range tests {
+		if !m.ValidateCookie(pkt) {
+			t.Errorf("ValidateCookie(%v) = false, want true", pkt)
+		}
+	}
+}
+
+func TestBalancedMode_Mode(t *testing.T) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+	if m.Mode() != ModeBalanced {
+		t.Errorf("Mode() = %v, want ModeBalanced", m.Mode())
+	}
+}
+
+func TestBalancedMode_ImplementsInterface(t *testing.T) {
+	obf, err := NewObfuscator(Config{
+		Mode:         ModeBalanced,
+		PaddingRange: [2]int{8, 64},
+		SNI:          "cloudflare.com",
+	})
+	if err != nil {
+		t.Fatalf("NewObfuscator() error = %v", err)
+	}
+	if obf == nil {
+		t.Fatal("expected non-nil Obfuscator")
+	}
+
+	// Verify all methods are accessible and don't panic
+	methods := []struct {
+		name string
+		fn   func()
+	}{
+		{"ObfuscateHandshakeInit", func() { _, _ = obf.ObfuscateHandshakeInit(makeHandshakeData(148)) }},
+		{"DeobfuscateHandshakeInit", func() {
+			wrapped, _ := ObfuscateClientHello(makeHandshakeData(148), "test.example.com")
+			_, _ = obf.DeobfuscateHandshakeInit(wrapped)
+		}},
+		{"ObfuscateData", func() { _, _ = obf.ObfuscateData([]byte{1}) }},
+		{"DeobfuscateData", func() { _, _ = obf.DeobfuscateData([]byte{0xD4, 0x1F, 0x00, 0x00}) }},
+		{"ValidateCookie", func() { _ = obf.ValidateCookie(nil) }},
+		{"Mode", func() { _ = obf.Mode() }},
+	}
+	for _, m := range methods {
+		t.Run(m.name, func(t *testing.T) {
+			m.fn()
+		})
+	}
+}
+
+func TestBalancedMode_DifferentSNI(t *testing.T) {
+	// Verify SNI is embedded in the TLS wrapper.
+	sni := "myvpn.example.com"
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: sni}
+
+	wrapped, err := m.ObfuscateHandshakeInit(makeHandshakeData(64))
+	if err != nil {
+		t.Fatalf("ObfuscateHandshakeInit: %v", err)
+	}
+
+	// Search for the SNI bytes in the wrapped packet.
+	if !bytes.Contains(wrapped, []byte(sni)) {
+		t.Errorf("SNI %q not found in wrapped packet", sni)
+	}
+}
+
+// =============================================================================
+// Benchmarks — VanillaMode vs LightMode vs BalancedMode
 // =============================================================================
 
 func BenchmarkVanillaMode_ObfuscateData(b *testing.B) {
@@ -361,8 +563,50 @@ func BenchmarkLightMode_ObfuscateHandshakeInit(b *testing.B) {
 	}
 }
 
+func BenchmarkBalancedMode_ObfuscateHandshakeInit(b *testing.B) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+	packet := makeHandshakeData(148)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = m.ObfuscateHandshakeInit(packet)
+	}
+}
+
+func BenchmarkBalancedMode_DeobfuscateHandshakeInit(b *testing.B) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+	wrapped, _ := m.ObfuscateHandshakeInit(makeHandshakeData(148))
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = m.DeobfuscateHandshakeInit(wrapped)
+	}
+}
+
+func BenchmarkBalancedMode_ObfuscateData(b *testing.B) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+	packet := makeData(1420)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, _ := m.ObfuscateData(packet)
+		_ = result
+	}
+}
+
+func BenchmarkBalancedMode_DeobfuscateData(b *testing.B) {
+	m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+	padded, _ := m.ObfuscateData(makeData(1420))
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		result, _ := m.DeobfuscateData(padded)
+		_ = result
+	}
+}
+
 // BenchmarkOverheadComparison measures the relative overhead of LightMode
-// vs VanillaMode on MTU-sized data packets.
+// vs VanillaMode vs BalancedMode on MTU-sized data packets.
 func BenchmarkOverheadComparison(b *testing.B) {
 	data := makeData(1420)
 
@@ -388,6 +632,27 @@ func BenchmarkOverheadComparison(b *testing.B) {
 
 	b.Run("LightMode_RoundTrip", func(b *testing.B) {
 		m := &LightMode{minPad: 8, maxPad: 64}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			padded, _ := m.ObfuscateData(data)
+			result, _ := m.DeobfuscateData(padded)
+			_ = result
+		}
+	})
+
+	b.Run("BalancedMode_ObfuscateData", func(b *testing.B) {
+		m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			result, _ := m.ObfuscateData(data)
+			_ = result
+		}
+	})
+
+	b.Run("BalancedMode_RoundTrip", func(b *testing.B) {
+		m := &BalancedMode{minPad: 8, maxPad: 64, sni: "cloudflare.com"}
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
