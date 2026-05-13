@@ -11,7 +11,7 @@ const (
 	// ModeLight — light obfuscation with minimal overhead (<3%). Implemented in Stage 3.
 	ModeLight ObfuscationMode = 1
 	// ModeBalanced — balanced obfuscation (~5–7% overhead). Combines padding + TLS mimicry lite.
-	// Planned for Stage 5.
+	// Implemented in Stage 5.
 	ModeBalanced ObfuscationMode = 2
 	// ModeMaximum — maximum obfuscation for strict DPI environments. Planned for Stage 6.
 	ModeMaximum ObfuscationMode = 3
@@ -50,7 +50,7 @@ type Obfuscator interface {
 	// DeobfuscateData restores a transport data packet on the receiver side.
 	DeobfuscateData(in []byte) ([]byte, error)
 	// ValidateCookie checks whether a packet carries a valid obfuscation cookie.
-	// VanillaMode and LightMode always return true (no cookie mechanism).
+	// VanillaMode, LightMode, and BalancedMode always return true (no cookie mechanism).
 	ValidateCookie(packet []byte) bool
 	// Mode returns the ObfuscationMode this instance was configured with.
 	Mode() ObfuscationMode
@@ -106,9 +106,10 @@ func ValidateConfig(cfg Config) error {
 // NewObfuscator is the factory function that creates an Obfuscator based on Config.
 //
 // Supported modes:
-//   - ModeVanilla — fully implemented (passthrough, zero overhead)
-//   - ModeLight — fully implemented (Stage 3: padding obfuscation)
-//   - ModeBalanced, ModeMaximum, ModeAuto — return descriptive
+//   - ModeVanilla  — fully implemented (passthrough, zero overhead)
+//   - ModeLight    — fully implemented (Stage 3: padding obfuscation)
+//   - ModeBalanced — fully implemented (Stage 5: TLS ClientHello + padding)
+//   - ModeMaximum, ModeAuto — return descriptive
 //     "not implemented yet" errors referencing the planned stage
 func NewObfuscator(cfg Config) (Obfuscator, error) {
 	// Apply defaults for zero-value config
@@ -129,7 +130,15 @@ func NewObfuscator(cfg Config) (Obfuscator, error) {
 			maxPad: cfg.PaddingRange[1],
 		}, nil
 	case ModeBalanced:
-		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 5)", cfg.Mode)
+		sni := cfg.SNI
+		if sni == "" {
+			sni = "cloudflare.com"
+		}
+		return &BalancedMode{
+			minPad: cfg.PaddingRange[0],
+			maxPad: cfg.PaddingRange[1],
+			sni:    sni,
+		}, nil
 	case ModeMaximum:
 		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 6)", cfg.Mode)
 	case ModeAuto:
