@@ -50,13 +50,65 @@ func (v *VanillaMode) Mode() ObfuscationMode {
 	return ModeVanilla
 }
 
+// --- LightMode: Stage 3 implementation ---
+
+// LightMode provides minimal obfuscation with very low overhead (<3%).
+//
+// LightMode obfuscates data packets using variable-length padding with a
+// random prefix and a magic discriminator (see common/padding.go for the
+// packet format). Handshake packets pass through unmodified to avoid
+// disrupting the WireGuard handshake.
+//
+// Overhead characteristics (DefaultConfig: minPad=8, maxPad=64):
+//   - Per data packet: 12–83 bytes (avg ~40, ~2.8% on MTU 1420)
+//   - Per handshake:   0 bytes (passthrough)
+//   - Average per-flow: <3%
+//
+// This mode is suitable for networks with light DPI that only check for
+// obvious VPN signatures.
+type LightMode struct {
+	minPad int
+	maxPad int
+}
+
+// Compile-time check: LightMode satisfies Obfuscator.
+var _ Obfuscator = (*LightMode)(nil)
+
+// ObfuscateHandshakeInit returns the handshake packet unchanged (passthrough).
+func (m *LightMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
+	return in, nil
+}
+
+// DeobfuscateHandshakeInit returns the handshake packet unchanged (passthrough).
+func (m *LightMode) DeobfuscateHandshakeInit(in []byte) ([]byte, error) {
+	return in, nil
+}
+
+// ObfuscateData wraps the data packet with the Stage 3 padding format.
+func (m *LightMode) ObfuscateData(in []byte) ([]byte, error) {
+	return AddPadding(in, m.minPad, m.maxPad)
+}
+
+// DeobfuscateData strips the Stage 3 padding and returns the original packet.
+// Returns ErrInvalidPadding if the packet is not a valid Stage 3 padded packet.
+func (m *LightMode) DeobfuscateData(in []byte) ([]byte, error) {
+	return RemovePadding(in)
+}
+
+// ValidateCookie always returns true (no cookie mechanism in LightMode).
+// Cookie-based validation will be added in Stage 6 (MaxMode).
+func (m *LightMode) ValidateCookie(packet []byte) bool {
+	return true
+}
+
+// Mode returns ModeLight.
+func (m *LightMode) Mode() ObfuscationMode {
+	return ModeLight
+}
+
 // --- Stub mode structs for future stages ---
 // Defined now to document the planned mode hierarchy and to allow
 // NewObfuscator to reference them in error messages.
-
-// LightMode provides minimal obfuscation with very low overhead (<3%).
-// Will be implemented in Stage 3.
-type LightMode struct{}
 
 // BalancedMode provides moderate obfuscation (8–15% overhead).
 // Combines padding + TLS mimicry for a good balance of stealth and performance.
