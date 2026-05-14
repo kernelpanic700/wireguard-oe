@@ -32,36 +32,40 @@ const (
 //
 // Packet structure:
 //
-//  RFC 5246 TLS Record Layer:
-//    [0x16]               ContentType: Handshake
-//    [0x03 0x03]          Version: TLS 1.2
-//    [RecordLen 2B]
+//	RFC 5246 TLS Record Layer:
+//	  [0x16]               ContentType: Handshake
+//	  [0x03 0x03]          Version: TLS 1.2
+//	  [RecordLen 2B]
 //
-//  Handshake — ClientHello:
-//    [0x01]               HandshakeType: ClientHello
-//    [HsLen 3B]
-//    [0x03 0x03]          Client Version: TLS 1.2
-//    [Random 32B]         crypto/rand (fresh each call)
-//    [SessionID Len 1B]
-//    [SessionID 0–32B]    crypto/rand
-//    [CipherSuites 10B]   4 static suites (Chrome-like)
-//    [Compression 2B]     null
-//    [Extensions Len 2B]
+//	Handshake — ClientHello:
+//	  [0x01]               HandshakeType: ClientHello
+//	  [HsLen 3B]
+//	  [0x03 0x03]          Client Version: TLS 1.2
+//	  [Random 32B]         crypto/rand (fresh each call)
+//	  [SessionID Len 1B]
+//	  [SessionID 0–32B]    crypto/rand (uniform distribution)
+//	  [CipherSuites 10B]   4 static suites (Chrome-like)
+//	  [Compression 2B]     length=1, method=null (RFC 5246)
+//	  [Extensions Len 2B]
 //
-//  Extensions:
-//    SNI (0x0000)         — configurable hostname, default "cloudflare.com"
-//    SupportedGroups      — x25519 + secp256r1
-//    ALPN                 — h2 + http/1.1
-//    GREASE (0xFAFA)      — [Magic 0xD4 0x1F | WG Handshake Data]
+//	Extensions:
+//	  SNI (0x0000)         — configurable hostname, default "cloudflare.com"
+//	  SupportedGroups      — x25519 + secp256r1
+//	  ALPN                 — h2 + http/1.1
+//	  GREASE (0xFAFA)      — [Magic 0xD4 0x1F | WG Handshake Data]
 //
 // The returned packet starts with 0x16 0x03 0x03 ... making it indistinguishable
 // from a real TLS handshake to simple DPI.
 //
 // Parameters:
 //   - data: the data to hide (typically a WireGuard handshake initiation).
+//     Must not be empty.
 //   - sni:  SNI hostname to advertise (e.g. "cloudflare.com" or "www.google.com").
-//           Empty string falls back to the default.
+//     Empty string falls back to the default.
 func ObfuscateClientHello(data []byte, sni string) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("wireguard handshake data must not be empty")
+	}
 	if len(data) > 65535-200 {
 		return nil, fmt.Errorf("data too large: %d bytes (max ~65335)", len(data))
 	}
@@ -72,12 +76,12 @@ func ObfuscateClientHello(data []byte, sni string) ([]byte, error) {
 		return nil, fmt.Errorf("SNI too long: %d bytes (max 255)", len(sni))
 	}
 
-	// --- Random session ID (0–32 bytes) ---
-	var rng [1]byte
+	// --- Random session ID (0–32 bytes, uniform distribution) ---
+	var rng [4]byte
 	if _, err := rand.Read(rng[:]); err != nil {
 		return nil, fmt.Errorf("crypto/rand session: %w", err)
 	}
-	sessionIDLen := int(rng[0]) % 33
+	sessionIDLen := int(binary.BigEndian.Uint32(rng[:])) % 33
 	sessionID := make([]byte, sessionIDLen)
 	if sessionIDLen > 0 {
 		if _, err := rand.Read(sessionID); err != nil {
@@ -99,24 +103,25 @@ func ObfuscateClientHello(data []byte, sni string) ([]byte, error) {
 	binary.BigEndian.PutUint16(cipherSuitesData[6:], cipherSuiteTLS_ECDHE_RSA_AES256_GCM)
 	binary.BigEndian.PutUint16(cipherSuitesData[8:], cipherSuiteTLS_ECDHE_ECDSA_CHACHA20_POLY1305)
 
-	// --- Compression: null ---
+	// --- Compression: 1 method, null (RFC 5246 §7.4.1.2) ---
+	// Wire format: [length 1B][methods...] — length=1, method=0x00 (null).
 	compressionData := []byte{0x01, 0x00}
 
 	// --- Build SNI extension ---
 	// Type(0x0000) + Len + ServerNameList
 	sniExtLen := 2 + 2 + 1 + 2 + len(sni) // = 7 + len(sni)
 	sniExt := make([]byte, 4+sniExtLen)
-	binary.BigEndian.PutUint16(sniExt[0:], 0x0000)                    // server_name
-	binary.BigEndian.PutUint16(sniExt[2:], uint16(sniExtLen))          // extension length
-	binary.BigEndian.PutUint16(sniExt[4:], uint16(len(sni)+3))        // SN list length
-	sniExt[6] = 0x00                                                     // name_type: host_name
-	binary.BigEndian.PutUint16(sniExt[7:], uint16(len(sni)))           // hostname length
+	binary.BigEndian.PutUint16(sniExt[0:], 0x0000)              // server_name
+	binary.BigEndian.PutUint16(sniExt[2:], uint16(sniExtLen))    // extension length
+	binary.BigEndian.PutUint16(sniExt[4:], uint16(len(sni)+3))   // SN list length
+	sniExt[6] = 0x00                                              // name_type: host_name
+	binary.BigEndian.PutUint16(sniExt[7:], uint16(len(sni)))     // hostname length
 	copy(sniExt[9:], sni)
 
 	// --- Build SupportedGroups extension ---
 	supportedGroupsExt := []byte{
 		0x00, 0x0A, 0x00, 0x06, // type + len
-		0x00, 0x04,             // groups length
+		0x00, 0x04, // groups length
 		0x00, 0x1D, // x25519
 		0x00, 0x17, // secp256r1
 	}
@@ -159,8 +164,8 @@ func ObfuscateClientHello(data []byte, sni string) ([]byte, error) {
 
 	// Record layer header
 	buf[pos] = 0x16 // ContentType: Handshake
-	binary.BigEndian.PutUint16(buf[pos+1:], 0x0303)               // Version: TLS 1.2
-	binary.BigEndian.PutUint16(buf[pos+3:], uint16(totalSize-5))   // record length
+	binary.BigEndian.PutUint16(buf[pos+1:], 0x0303)             // Version: TLS 1.2
+	binary.BigEndian.PutUint16(buf[pos+3:], uint16(totalSize-5)) // record length
 	pos += 5
 
 	// Handshake header
