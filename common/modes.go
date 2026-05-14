@@ -79,6 +79,7 @@ type LightMode struct {
 var _ Obfuscator = (*LightMode)(nil)
 
 // ObfuscateHandshakeInit returns the handshake packet unchanged (passthrough).
+// Rejects empty input to prevent silent protocol failures.
 func (m *LightMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
 	if len(in) == 0 {
 		return nil, fmt.Errorf("wireguard handshake data must not be empty")
@@ -139,7 +140,11 @@ var _ Obfuscator = (*BalancedMode)(nil)
 
 // ObfuscateHandshakeInit wraps the handshake packet in a TLS 1.2 ClientHello
 // using the configured SNI hostname.
+// Rejects empty input to prevent silent protocol failures.
 func (m *BalancedMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("wireguard handshake data must not be empty")
+	}
 	return ObfuscateClientHello(in, m.sni)
 }
 
@@ -205,7 +210,11 @@ var _ Obfuscator = (*MaxMode)(nil)
 
 // ObfuscateHandshakeInit builds a cookie payload from the handshake data,
 // then wraps everything in a TLS ClientHello.
+// Rejects empty input to prevent silent protocol failures.
 func (m *MaxMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("wireguard handshake data must not be empty")
+	}
 	payload, err := EmbedCookiePayload(m.cookieKey, in)
 	if err != nil {
 		return nil, fmt.Errorf("cookie payload: %w", err)
