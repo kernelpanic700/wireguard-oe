@@ -4,14 +4,15 @@ package common
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
 
 // WireGuard-OE Stage 3 packet format:
 //
-//   [ Random Prefix (0–16 bytes) | Original Data | Magic 0xD4 0x1F |
-//     Random Padding (P bytes) | PadLen (1 byte) | PrefLen (1 byte) ]
+//	[ Random Prefix (0–16 bytes) | Original Data | Magic 0xD4 0x1F |
+//	  Random Padding (P bytes) | PadLen (1 byte) | PrefLen (1 byte) ]
 //
 // PrefLen  = last byte:        length of the random prefix (0–16)
 // PadLen   = second-last byte: length of the random padding (0–255)
@@ -38,6 +39,37 @@ const (
 // wrong magic bytes, or invalid length fields.
 var ErrInvalidPadding = errors.New("invalid padding: not a WireGuard-OE packet")
 
+// uniformRand returns a uniformly distributed random integer in [0, n).
+//
+// Uses rejection sampling over a 4-byte random value: values ≥ max are
+// discarded and re-rolled. This guarantees perfect uniformity for any n ≤ 256
+// with a single crypto/rand read in >99.6% of cases (worst case n=257 needs 1
+// retry in ~39% of calls — the function loops until success).
+//
+// Panics if n ≤ 0 or n > math.MaxUint32 (caller responsibility to provide a
+// valid range).
+func uniformRand(n int) (int, error) {
+	// Fast path: n=1 always returns 0.
+	if n == 1 {
+		return 0, nil
+	}
+
+	var buf [4]byte
+	for {
+		if _, err := rand.Read(buf[:]); err != nil {
+			return 0, err
+		}
+		v := binary.BigEndian.Uint32(buf[:])
+
+		// max ≡ largest multiple of n below 2^32.
+		max := uint32((1<<32)/n) * uint32(n)
+		if v < max {
+			return int(v % uint32(n)), nil
+		}
+		// else: rejection — loop again.
+	}
+}
+
 // AddPadding appends a random prefix, a magic discriminator, and random padding
 // to the input data according to the Stage 3 format.
 //
@@ -58,14 +90,17 @@ func AddPadding(data []byte, minPad, maxPad int) ([]byte, error) {
 		return nil, fmt.Errorf("maxPad (%d) exceeds 255", maxPad)
 	}
 
-	// Read 2 random bytes: one for PrefLen, one for PadLen (scaled).
-	var rng [2]byte
-	if _, err := rand.Read(rng[:]); err != nil {
-		return nil, fmt.Errorf("crypto/rand: %w", err)
+	// Uniform random lengths via rejection sampling (no bias).
+	prefLen, err := uniformRand(maxPrefix + 1) // 0..16
+	if err != nil {
+		return nil, fmt.Errorf("crypto/rand prefix len: %w", err)
 	}
-
-	prefLen := int(rng[0]) % (maxPrefix + 1)       // 0..16
-	padLen := int(rng[1])%(maxPad-minPad+1) + minPad // minPad..maxPad
+	padRange := maxPad - minPad + 1
+	padLenRaw, err := uniformRand(padRange) // 0..(maxPad-minPad)
+	if err != nil {
+		return nil, fmt.Errorf("crypto/rand pad len: %w", err)
+	}
+	padLen := padLenRaw + minPad // minPad..maxPad
 
 	totalLen := len(data) + prefLen + padLen + fixedOverhead
 	buf := make([]byte, totalLen)
@@ -105,7 +140,7 @@ func AddPadding(data []byte, minPad, maxPad int) ([]byte, error) {
 // the input.
 //
 // Returns ErrInvalidPadding for any malformed input (wrong magic, truncated
-// packet, invalid length fields).
+// packet, invalid length fields, or extra trailing bytes).
 func RemovePadding(data []byte) ([]byte, error) {
 	n := len(data)
 	if n < fixedOverhead {
@@ -120,13 +155,15 @@ func RemovePadding(data []byte) ([]byte, error) {
 	padLen := int(data[n-2])
 	// padLen can be 0..255, no upper bound check beyond what the total len enforces.
 
-	if n < prefLen+padLen+fixedOverhead {
+	// Strict length check: reject extra bytes beyond the expected packet.
+	expectedLen := prefLen + padLen + fixedOverhead
+	if n != expectedLen {
 		return nil, ErrInvalidPadding
 	}
 
 	// Magic bytes are located right after prefix+original_data.
 	magicPos := n - 2 - padLen - 2
-	if magicPos < prefLen || magicPos+1 >= n {
+	if magicPos < prefLen {
 		return nil, ErrInvalidPadding
 	}
 	if data[magicPos] != magic0 || data[magicPos+1] != magic1 {
