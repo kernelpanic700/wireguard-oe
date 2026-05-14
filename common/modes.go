@@ -80,6 +80,9 @@ var _ Obfuscator = (*LightMode)(nil)
 
 // ObfuscateHandshakeInit returns the handshake packet unchanged (passthrough).
 func (m *LightMode) ObfuscateHandshakeInit(in []byte) ([]byte, error) {
+	if len(in) == 0 {
+		return nil, fmt.Errorf("wireguard handshake data must not be empty")
+	}
 	return in, nil
 }
 
