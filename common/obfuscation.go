@@ -103,6 +103,7 @@ func ValidateConfig(cfg Config) error {
 	if cfg.JunkRange[0] > cfg.JunkRange[1] {
 		return fmt.Errorf("junk range min (%d) > max (%d)", cfg.JunkRange[0], cfg.JunkRange[1])
 	}
+	// CookieKey, if provided, must be exactly 32 bytes (applies to any mode).
 	if cfg.CookieKey != nil && len(cfg.CookieKey) != 32 {
 		return fmt.Errorf("cookie key must be exactly 32 bytes, got %d", len(cfg.CookieKey))
 	}
@@ -110,9 +111,6 @@ func ValidateConfig(cfg Config) error {
 	if cfg.Mode == ModeMaximum {
 		if cfg.CookieKey == nil {
 			return fmt.Errorf("cookie key is required for %s mode", cfg.Mode)
-		}
-		if len(cfg.CookieKey) != 32 {
-			return fmt.Errorf("cookie key must be exactly 32 bytes for %s mode", cfg.Mode)
 		}
 	}
 	// For modes that use TLS mimicry, SNI must be non-empty.
@@ -168,11 +166,14 @@ func NewObfuscator(cfg Config) (Obfuscator, error) {
 		if sni == "" {
 			sni = DefaultConfig().SNI
 		}
+		// Clone CookieKey to avoid aliasing the config's backing array.
+		key := make([]byte, len(cfg.CookieKey))
+		copy(key, cfg.CookieKey)
 		return &MaxMode{
 			minPad:    cfg.PaddingRange[0],
 			maxPad:    cfg.PaddingRange[1],
 			sni:       sni,
-			cookieKey: cfg.CookieKey,
+			cookieKey: key,
 		}, nil
 	case ModeAuto:
 		return nil, fmt.Errorf("mode %q is not implemented yet (planned for Stage 12)", cfg.Mode)
